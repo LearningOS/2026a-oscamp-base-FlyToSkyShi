@@ -102,8 +102,9 @@ impl Sv39PageTable {
     ///
     /// 提示：右移 (12 + level * 9) 位，然后与 0x1FF 做掩码。
     pub fn extract_vpn(va: u64, level: usize) -> usize {
-        // TODO: 从虚拟地址中提取指定级别的 VPN 索引
-        todo!()
+        // 从虚拟地址中提取指定级别的 VPN 索引
+        let shift = 12 + (level as u32) * 9;
+        ((va >> shift) & 0x1FF) as usize
     }
 
     /// 建立从虚拟页到物理页的映射（4KB 页）。
@@ -113,13 +114,40 @@ impl Sv39PageTable {
     /// - `pa`: 物理地址（会自动对齐到页边界）
     /// - `flags`: 标志位（如 PTE_V | PTE_R | PTE_W）
     pub fn map_page(&mut self, va: u64, pa: u64, flags: u64) {
-        // TODO: 实现三级页表的映射
+        // 实现三级页表的映射
         //
         // 提示：你需要从根页表开始，逐级向下遍历页表层级（level 2 → level 1 → level 0）。
         // 对于中间层级（level 2 和 level 1），如果对应 VPN 的页表项（PTE）无效（PTE_V == 0），
         // 则需要分配一个新的页表节点（使用 alloc_node），并将新节点的 PPN 写入当前 PTE（仅设置 PTE_V 标志）。
         // 最后在 level 0 的 PTE 中写入目标物理页号（pa >> 12）和 flags。
-        todo!()
+         let mut node_ppn = self.root_ppn;
+
+        // level 2 -> level 1：只走中间层
+        for level in [2usize, 1] {
+            let vpn = Self::extract_vpn(va, level);
+            let pte = self.nodes.get(&node_ppn).unwrap().entries[vpn];
+
+            if pte & PTE_V == 0 {
+                // 中间层缺失，分配新页表节点
+                let new_ppn = self.alloc_node();
+                let new_pte = (new_ppn << PPN_SHIFT) | PTE_V;
+                self.nodes
+                    .get_mut(&node_ppn)
+                    .unwrap()
+                    .entries[vpn] = new_pte;
+                node_ppn = new_ppn;
+            } else {
+                // 已存在中间页表，取其 PPN 继续向下
+                node_ppn = pte >> PPN_SHIFT;
+            }
+        }
+        // level 0：写入叶子 PTE
+        let vpn0 = Self::extract_vpn(va, 0);
+        let leaf_pte = ((pa >> 12) << PPN_SHIFT) | flags;
+        self.nodes
+            .get_mut(&node_ppn)
+            .unwrap()
+            .entries[vpn0] = leaf_pte;
     }
 
     /// 遍历三级页表，将虚拟地址翻译为物理地址。
@@ -133,7 +161,7 @@ impl Sv39PageTable {
     ///    d. 否则用 PTE 中的 PPN 进入下一级页表
     /// 3. level 0 的 PTE 必须是叶节点
     pub fn translate(&self, va: u64) -> TranslateResult {
-        // TODO: 实现三级页表遍历
+        // 实现三级页表遍历
         //
         // 提示：你需要从根页表开始，按 level 2 → level 1 → level 0 的顺序逐级遍历。
         // 每一级都需要通过 VPN[level] 索引当前页表节点的条目（PTE）。
@@ -141,7 +169,42 @@ impl Sv39PageTable {
         // 如果 PTE 是叶节点（即 R、W、X 标志位中有至少一个被置位），则可以直接使用该 PTE 中的物理页号（PPN）计算最终的物理地址。
         // 否则，该 PTE 指向下一级页表节点，继续遍历下一级。
         // 遍历到 level 0 时，PTE 必须是叶节点。
-        todo!()
+        let mut node_ppn = self.root_ppn;
+
+        for level in (0..=2).rev() {
+            let vpn = Self::extract_vpn(va, level);
+
+            let node = match self.nodes.get(&node_ppn) {
+                Some(n) => n,
+                None => return TranslateResult::PageFault,
+            };
+
+            let pte = node.entries[vpn];
+
+            if pte & PTE_V == 0 {
+                return TranslateResult::PageFault;
+            }
+
+            let is_leaf = pte & (PTE_R | PTE_W | PTE_X) != 0;
+
+            if is_leaf {
+                // 叶子 PTE：根据层级取对应的 offset 位宽
+                // level 0 -> 12 位；level 1 -> 21 位；level 2 -> 30 位
+                let ppn = pte >> PPN_SHIFT;
+                let offset_mask = (1u64 << (12 + (level as u32) * 9)) - 1;
+                let offset = va & offset_mask;
+                return TranslateResult::Ok((ppn << 12) | offset);
+            }
+
+            // 非叶子：必须继续向下；level 0 若还是非叶子则非法
+            if level == 0 {
+                return TranslateResult::PageFault;
+            }
+
+            node_ppn = pte >> PPN_SHIFT;
+        }
+
+        TranslateResult::PageFault
     }
 
     /// 建立大页映射（2MB superpage，在 level 1 设叶子 PTE）。
@@ -154,13 +217,39 @@ impl Sv39PageTable {
         assert_eq!(va % mega_size, 0, "va must be 2MB-aligned");
         assert_eq!(pa % mega_size, 0, "pa must be 2MB-aligned");
 
-        // TODO: 实现大页映射
+        // 实现大页映射
         //
         // 提示：大页映射与普通页映射类似，但只需要遍历到 level 1。
         // 你需要在 level 2 找到或创建中间页表节点，然后在 level 1 写入叶子 PTE。
         // 注意大页的物理页号计算方式与普通页相同（pa >> 12），
         // 但翻译时 offset 包含虚拟地址的低 21 位（VPN[0] 部分 + 12 位页内偏移）。
-        todo!()
+        let mega_size: u64 = (PAGE_SIZE * PT_ENTRIES) as u64; // 2MB
+        assert_eq!(va % mega_size, 0, "va must be 2MB-aligned");
+        assert_eq!(pa % mega_size, 0, "pa must be 2MB-aligned");
+
+        // 只在 level 2 走一级，必要时分配中间页表节点
+        let vpn2 = Self::extract_vpn(va, 2);
+        let pte2 = self.nodes.get(&self.root_ppn).unwrap().entries[vpn2];
+
+        let node_ppn = if pte2 & PTE_V == 0 {
+            let new_ppn = self.alloc_node();
+            let new_pte = (new_ppn << PPN_SHIFT) | PTE_V;
+            self.nodes
+                .get_mut(&self.root_ppn)
+                .unwrap()
+                .entries[vpn2] = new_pte;
+            new_ppn
+        } else {
+            pte2 >> PPN_SHIFT
+        };
+
+        // level 1 写入叶子 PTE（superpage）
+        let vpn1 = Self::extract_vpn(va, 1);
+        let leaf_pte = ((pa >> 12) << PPN_SHIFT) | flags;
+        self.nodes
+            .get_mut(&node_ppn)
+            .unwrap()
+            .entries[vpn1] = leaf_pte;
     }
 }
 

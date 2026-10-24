@@ -34,13 +34,14 @@ impl FlagChannel {
 
     /// Producer: store data first, then set ready flag.
     ///
-    /// TODO: Choose correct Ordering
+    /// Choose correct Ordering
     /// - What Ordering should be used for writing data?
     /// - What Ordering should be used for writing ready? (ensuring data writes are visible to consumer)
     pub fn produce(&self, value: u32) {
-        // TODO: Store data (choose appropriate Ordering)
-        // TODO: Set ready = true (choose appropriate Ordering so data writes complete before this)
-        todo!()
+        // Step1: Store data (choose appropriate Ordering)
+        self.data.store(value, Ordering::Relaxed);
+        // Step2: Set ready = true (choose appropriate Ordering so data writes complete before this)
+        self.ready.store(true, Ordering::Release);
     }
 
     /// Consumer: spin-wait for ready flag, then read data.
@@ -49,9 +50,12 @@ impl FlagChannel {
     /// - What Ordering should be used for reading ready? (ensuring it sees data writes from produce)
     /// - What Ordering should be used for reading data?
     pub fn consume(&self) -> u32 {
-        // TODO: Spin-wait for ready to become true (choose appropriate Ordering)
-        // TODO: Read data (choose appropriate Ordering)
-        todo!()
+        // step1: Spin-wait for ready to become true (choose appropriate Ordering)
+        while !self.ready.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        // step2: Read data (choose appropriate Ordering)
+        self.data.load(Ordering::Relaxed)
     }
 
     /// Reset channel state
@@ -81,15 +85,24 @@ impl OnceCell {
     ///
     /// Hint: use `compare_exchange` to ensure only one thread succeeds.
     pub fn init(&self, val: u32) -> bool {
-        // TODO: Use compare_exchange to ensure initialization only once
+        // Use compare_exchange to ensure initialization only once
         // Store value on success
-        todo!()
+        if self.initialized.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            self.value.store(val, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get value. Returns Some if initialized, otherwise None.
     pub fn get(&self) -> Option<u32> {
-        // TODO: Check initialized flag, then read value
-        todo!()
+        // Check initialized flag, then read value
+        if self.initialized.load(Ordering::SeqCst) {
+            Some(self.value.load(Ordering::SeqCst))
+        } else {
+            None
+        }
     }
 }
 
